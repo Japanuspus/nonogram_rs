@@ -1,4 +1,5 @@
 use std::iter;
+use serde::{Deserialize};
 
 #[derive(Debug)]
 struct ColumnConfigs<'a> {
@@ -67,7 +68,18 @@ fn test_column_configs() {
     assert_eq!(column_configs(&vec![2,2], 6).count(), 3)
 }
 
+#[derive(Debug, Deserialize)]
+struct Puzzle {
+    horizontal: Vec<Vec<usize>>,
+    vertical: Vec<Vec<usize>>,
+}
+
 fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    if args.len()>1 {
+        let puzzle: Puzzle = serde_json::from_str(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
+        println!("{:?}", puzzle);
+    }
     for cfg in column_configs(&vec![2,2], 6) {
         println!("Possible config: {:?}", cfg);
     }
