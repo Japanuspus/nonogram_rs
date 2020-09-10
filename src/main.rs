@@ -13,63 +13,57 @@ impl BlockSpec {
         let n_space = (size+1).checked_sub(block_sizes.len()+block_sizes.iter().sum::<usize>()).expect("Provided size below min requirement");
         Self{block_sizes, size, n_space}
     }
-
-    /// spaces is same length as block_sizes and indicate number spaces before a given block, not including spaces
-    /// that must be present. 
-    /// remaining_spaces is redundant information only passed for efficiency
-    fn make_config_iter<'a>(&'a self, spaces: &'a Vec<usize>, remaining_spaces: usize) -> impl Iterator<Item=bool> + 'a {
-        spaces.iter().enumerate().zip(self.block_sizes.iter())
-        .flat_map(|((i, &s),&t)| {
-            iter::repeat(false).take(if i==0 {s} else {s+1}).chain(iter::repeat(true).take(t))
-        })
-        .chain(iter::repeat(false).take(remaining_spaces))
-    }
-
-    fn make_config(&self, spaces: &Vec<usize>, remaining_spaces: usize) -> Vec<bool> {
-        self.make_config_iter(spaces, remaining_spaces).collect()
-    }
 }
 
 struct ColumnConfigs<'a> {
     spec: &'a BlockSpec,
+    /// spaces is same length as block_sizes and indicate number spaces before a given block, not including spaces
+    /// that must be present. 
+    /// remaining_spaces is redundant information only passed for efficiency
     spaces: Vec<usize>,
+    exhausted: bool, // needed to allow 0-bloc configs
 }
 
+// the spaces vectors could also be generated as iterators. that will be next step...
 impl <'a> ColumnConfigs<'a> {
-    fn remaining_spaces(&self) -> Option<usize> {
-        self.spec.n_space.checked_sub(self.spaces.iter().sum::<usize>())
+    fn new(spec: &'a BlockSpec) -> Self {
+        ColumnConfigs{spec, spaces: vec![0; spec.block_sizes.len()], exhausted: false}
     }
 
-    fn increment(&mut self, remaining_spaces: usize) {
-        // reset first non-zero and increment entry after that
-        let j = if remaining_spaces==0 {
-            let i_max = self.spec.block_sizes.len().checked_sub(1).unwrap_or(0);
-            let i = self.spaces.iter().enumerate()
-                .filter(|(_i, &s)| s>0).map(|(i, _s)| i).next().unwrap_or(i_max);
-            if i<i_max {
-                self.spaces[i] = 0;
-                i+1
-            } else { i } //keep incrementing last entry if we are done
-        } else { 0 };  //increment first entry if nothing is reset
-        self.spaces[j]+=1;        
+    fn remaining_spaces(&self) -> usize {
+        self.spec.n_space.checked_sub(self.spaces.iter().sum::<usize>()).expect("Invalid spaces state")
     }
-}
 
-impl Iterator for ColumnConfigs<'_> {
-    type Item = Vec<bool>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(remaining_spaces) = self.remaining_spaces() {
-            let this_config = self.spec.make_config(&self.spaces, remaining_spaces);
-            self.increment(remaining_spaces);
-            Some(this_config)
-        } else {
-            None
-        }
+    fn increment(&mut self) {
+        assert!(!self.exhausted);
+        let n_remain = self.remaining_spaces();
+        if n_remain > 0 {
+            // Add more more space at start
+            self.spaces[0]+=1;
+            return
+        } 
+        if let Some(i) = self.spaces.iter().enumerate()
+            .filter(|(_i, &s)| s>0).map(|(i, _s)| i).next() {
+                if i+1<self.spaces.len() {
+                    // reset first non-zero and increment the next entry
+                    self.spaces[i+1]+=1;
+                    self.spaces[i]=0;
+                    return 
+                }
+        } 
+        // we are done
+        self.exhausted = true;
     }
-}
 
-fn column_configs<'a>(spec: &'a BlockSpec) -> ColumnConfigs<'a> {
-    ColumnConfigs{spec, spaces: vec![0; spec.block_sizes.len()]}
+    fn make_config_iter(&'a self) -> impl Iterator<Item=bool> + 'a {
+        assert!(!self.exhausted);
+        let n_remain = self.remaining_spaces();
+        self.spaces.iter().enumerate().zip(self.spec.block_sizes.iter())
+        .flat_map(|((i, &s),&t)| {
+            iter::repeat(false).take(if i==0 {s} else {s+1}).chain(iter::repeat(true).take(t))
+        })
+        .chain(iter::repeat(false).take(n_remain))
+    }
 }
 
 #[test]
@@ -78,10 +72,32 @@ fn test_block_spec() {
     assert_eq!(bs.n_space, 7-(2+1+3));
 }
 
+fn all_configs(bs: &BlockSpec) -> Vec<Vec<bool>> {
+    let mut cc = ColumnConfigs::new(&bs);
+    let mut configs = Vec::new();
+    while !cc.exhausted  {
+        configs.push(cc.make_config_iter().collect());
+        cc.increment();
+    };
+    configs
+}
+
 #[test]
 fn test_column_configs() {
     let bs = BlockSpec::new(vec![2,3], 7);
-    assert_eq!(column_configs(&bs).count(), 3)
+    let mut cc = ColumnConfigs::new(&bs);
+    let mut n = 0;
+    while !cc.exhausted  {
+        n+=1;
+        cc.increment();
+    };
+    assert_eq!(n, 3);
+}
+
+#[test]
+fn test_wider_configs() {
+    assert_eq!(all_configs(&BlockSpec::new(vec![2], 7)).len(), 6);
+    assert_eq!(all_configs(&BlockSpec::new(vec![2,2], 7)).len(), 6);
 }
 
 /// Input file structure
@@ -140,27 +156,29 @@ fn test_advance_row() {
 
 fn solve_recursive(row_configs: Vec<&[bool]>, cols: &[BlockSpec]) -> Option<Vec<Vec<bool>>> {
     println!("Recursive solve called for length {}", cols.len());
-    if cols.len()==0 {
-        return Some(Vec::new())
-    }
+    if cols.len()==0 {return Some(Vec::new())};
     let col = &cols[0];
     let rest = &cols[1..];
-    for cfg in column_configs(col) {
-        if let Ok(next_row_configs) = cfg.iter().zip(row_configs.iter())
-        .map(|(&c, row)| advance_row(row, c, rest.len()))
+    let mut cc = ColumnConfigs::new(col);
+    while !cc.exhausted {
+        if let Ok(next_row_configs) = cc.make_config_iter().zip(row_configs.iter())
+        .map(|(c, row)| advance_row(row, c, rest.len()))
         .collect() {
             if let Some(mut sol)=solve_recursive(next_row_configs, rest) {
-                sol.push(cfg);
+                sol.push(ColumnConfigs::new(col).make_config_iter().collect());
                 return Some(sol)
             }
-        }
+        };
+        cc.increment();
     };
     None
 }
 
 fn make_row_config(bs: &BlockSpec) -> Vec<bool> {
+    let cc = ColumnConfigs::new(bs);
     iter::once(false)
-    .chain(bs.make_config_iter(&vec![0;bs.block_sizes.len()], 1))
+    .chain(cc.make_config_iter().take(bs.size-cc.remaining_spaces()))
+    .chain(iter::once(false))
     .collect()
 }
 
@@ -185,5 +203,5 @@ fn main() {
     let puzzle: Puzzle = serde_json::from_str(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
     println!("Puzzle: {:?}", puzzle);
     let res = solve(puzzle);
-    println!("Solution: {:?}", res)
+    println!("Solution: {:?}", res);
 }
