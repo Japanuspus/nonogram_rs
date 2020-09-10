@@ -14,19 +14,26 @@ impl BlockSpec {
     }
 }
 
-struct ColumnConfigs<'a> {
+#[derive(Debug, PartialEq)]
+enum ColumnConfigPhase {
+    Starting,
+    Running,
+    Exhausted,
+}
+
+struct BlockSpecIterator<'a> {
     spec: &'a BlockSpec,
     /// spaces is same length as block_sizes and indicate number spaces before a given block, not including spaces
     /// that must be present. 
     /// remaining_spaces is redundant information only passed for efficiency
     spaces: Vec<usize>,
-    exhausted: bool, // needed to allow 0-bloc configs
+    phase: ColumnConfigPhase, // needed to allow 0-bloc configs
 }
 
 // the spaces vectors could also be generated as iterators. that will be next step...
-impl <'a> ColumnConfigs<'a> {
+impl <'a> BlockSpecIterator<'a> {
     fn new(spec: &'a BlockSpec) -> Self {
-        ColumnConfigs{spec, spaces: vec![0; spec.block_sizes.len()], exhausted: false}
+        BlockSpecIterator{spec, spaces: vec![0; spec.block_sizes.len()], phase: ColumnConfigPhase::Starting}
     }
 
     fn remaining_spaces(&self) -> usize {
@@ -34,7 +41,7 @@ impl <'a> ColumnConfigs<'a> {
     }
 
     fn increment(&mut self) {
-        assert!(!self.exhausted);
+        assert!(self.phase!=ColumnConfigPhase::Exhausted);
         let n_remain = self.remaining_spaces();
         if n_remain > 0 {
             // Add more more space at start
@@ -51,11 +58,11 @@ impl <'a> ColumnConfigs<'a> {
                 }
         } 
         // we are done
-        self.exhausted = true;
+        self.phase = ColumnConfigPhase::Exhausted;
     }
 
     fn make_config_iter(&'a self) -> impl Iterator<Item=bool> + 'a {
-        assert!(!self.exhausted);
+        assert!(self.phase!=ColumnConfigPhase::Exhausted);
         let n_remain = self.remaining_spaces();
         self.spaces.iter().enumerate().zip(self.spec.block_sizes.iter())
         .flat_map(|((i, &s),&t)| {
@@ -65,35 +72,56 @@ impl <'a> ColumnConfigs<'a> {
     }
 }
 
+impl <'a> Iterator for BlockSpecIterator<'a> {
+    // type Item = impl Iterator<Item=bool> + 'a;  this is not stable, so collect
+    type Item = Vec<bool>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.phase {
+            ColumnConfigPhase::Starting => {
+                self.phase = ColumnConfigPhase::Running;
+            },
+            ColumnConfigPhase::Running => {
+                self.increment();
+            },
+            ColumnConfigPhase::Exhausted => {},
+        };
+        if self.phase == ColumnConfigPhase::Exhausted {
+            None
+        } else {
+            Some(self.make_config_iter().collect())
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a BlockSpec {
+    type Item = Vec<bool>;
+    type IntoIter = BlockSpecIterator <'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        BlockSpecIterator::new(self)
+    }
+}
+
 #[test]
 fn test_block_spec() {
     let bs = BlockSpec::new(vec![2,3], 7);
     assert_eq!(bs.n_space, 7-(2+1+3));
 }
 
-#[allow(dead_code)]
-fn all_configs(bs: &BlockSpec) -> Vec<Vec<bool>> {
-    let mut cc = ColumnConfigs::new(&bs);
-    let mut configs = Vec::new();
-    while !cc.exhausted  {
-        configs.push(cc.make_config_iter().collect());
-        cc.increment();
-    };
-    configs
-}
-
 #[test]
 fn test_column_configs() {
     let bs = BlockSpec::new(vec![2,3], 7);
-    let mut cc = ColumnConfigs::new(&bs);
     let mut n = 0;
-    while !cc.exhausted  {
+    for _ in &bs {
         n+=1;
-        cc.increment();
     };
     assert_eq!(n, 3);
 }
 
+#[allow(dead_code)]
+fn all_configs(bs: &BlockSpec) -> Vec<Vec<bool>> {
+    bs.into_iter().collect()
+}
 #[test]
 fn test_wider_configs() {
     assert_eq!(all_configs(&BlockSpec::new(vec![2], 7)).len(), 6);
@@ -159,23 +187,23 @@ fn solve_recursive(row_configs: Vec<&[bool]>, cols: &[BlockSpec]) -> Option<Vec<
     if cols.len()==0 {return Some(Vec::new())};
     let col = &cols[0];
     let rest = &cols[1..];
-    let mut cc = ColumnConfigs::new(col);
-    while !cc.exhausted {
-        if let Ok(next_row_configs) = cc.make_config_iter().zip(row_configs.iter())
+    for cfg in col {
+        if let Ok(next_row_configs) = 
+        cfg.into_iter().zip(row_configs.iter())
         .map(|(c, row)| advance_row(row, c, rest.len()))
         .collect() {
-            if let Some(mut sol)=solve_recursive(next_row_configs, rest) {
-                sol.push(ColumnConfigs::new(col).make_config_iter().collect());
+            if let Some(mut sol) =
+            solve_recursive(next_row_configs, rest) {
+                sol.push(BlockSpecIterator::new(col).make_config_iter().collect());
                 return Some(sol)
             }
         };
-        cc.increment();
     };
     None
 }
 
 fn make_row_config(bs: &BlockSpec) -> Vec<bool> {
-    let cc = ColumnConfigs::new(bs);
+    let cc = BlockSpecIterator::new(bs);
     iter::once(false)
     .chain(cc.make_config_iter().take(bs.size-cc.remaining_spaces()))
     .chain(iter::once(false))
