@@ -1,7 +1,6 @@
 use std::iter;
 use serde::{Deserialize};
 
-
 struct BlockSpec {
     block_sizes: Vec<usize>,
     size: usize,
@@ -72,6 +71,7 @@ fn test_block_spec() {
     assert_eq!(bs.n_space, 7-(2+1+3));
 }
 
+#[allow(dead_code)]
 fn all_configs(bs: &BlockSpec) -> Vec<Vec<bool>> {
     let mut cc = ColumnConfigs::new(&bs);
     let mut configs = Vec::new();
@@ -102,7 +102,7 @@ fn test_wider_configs() {
 
 /// Input file structure
 #[derive(Debug, Deserialize)]
-struct Puzzle {
+pub struct Puzzle {
     horizontal: Vec<Vec<usize>>,
     vertical: Vec<Vec<usize>>,
 }
@@ -188,20 +188,11 @@ fn test_make_row_config() {
     assert_eq!(rc, vec![false, true, true, false, true, false]);
 }
 
-fn solve(puzzle: Puzzle) -> Option<Vec<Vec<bool>>> {
+pub fn solve(puzzle: Puzzle) -> Option<Vec<Vec<bool>>> {
     let n_col = puzzle.vertical.len();
     let n_row = puzzle.horizontal.len();
     let cols: Vec<_> = puzzle.vertical.into_iter().map(|bs| BlockSpec::new(bs, n_row)).collect();
     let rows: Vec<_> = puzzle.horizontal.into_iter().map(|bs| BlockSpec::new(bs, n_col)).collect();
     let row_configs: Vec<Vec<bool>> = rows.iter().map(make_row_config).collect();
     solve_recursive(row_configs.iter().map(|v| &v[..]).collect(), &cols)
-}
-
-fn main() {
-    let args: Vec<_> = std::env::args().collect();
-
-    let puzzle: Puzzle = serde_json::from_str(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
-    println!("Puzzle: {:?}", puzzle);
-    let res = solve(puzzle);
-    println!("Solution: {:?}", res);
 }
